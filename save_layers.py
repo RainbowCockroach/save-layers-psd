@@ -320,30 +320,45 @@ def pick_mode() -> str:
 
 
 def run_with_macos_events():
-    """On macOS .app, use tkinter Apple Event handler for drag-and-drop."""
+    """On macOS .app, use tkinter Apple Event handler for drag-and-drop.
+
+    When a file is dragged onto the .app, macOS delivers the path via an
+    Apple Event (not sys.argv). We listen for it briefly, then either
+    process the file or fall back to the file picker. The event-listening
+    root is fully destroyed before any subsequent dialogs are shown, so
+    there is only ever one Tk instance at a time.
+    """
     import tkinter as tk
+
+    received_file = [None]
+    timer_id = [None]
 
     root = tk.Tk()
     root.withdraw()
 
     def on_open_document(*args):
-        """Called by macOS when files are dropped onto the .app."""
-        for file_path in args:
-            process_psd(file_path)
-        root.after(100, root.destroy)
+        """Called by macOS when a file is dropped onto the .app."""
+        if timer_id[0] is not None:
+            root.after_cancel(timer_id[0])
+        if args:
+            received_file[0] = args[0]
+        root.quit()
 
-    # Register macOS open-document handler
+    def fallback_to_picker():
+        """No Apple Event received — exit mainloop so we can show file picker."""
+        root.quit()
+
     root.createcommand("::tk::mac::OpenDocument", on_open_document)
+    timer_id[0] = root.after(1500, fallback_to_picker)
+    root.mainloop()
+    root.destroy()
 
-    # Give macOS a moment to deliver the Apple Event, then check if
-    # we got a file. If not after 2 seconds, fall back to file picker.
-    def check_or_pick():
+    # Now the event root is gone — safe to create new Tk instances in dialogs
+    if received_file[0]:
+        process_psd(received_file[0])
+    else:
         psd_path = pick_psd_file()
         process_psd(psd_path)
-        root.destroy()
-
-    root.after(500, check_or_pick)
-    root.mainloop()
 
 
 def main():
