@@ -17,7 +17,9 @@ Also supports drag-and-drop onto the executable on both Windows and macOS.
 """
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -82,7 +84,8 @@ def export_layer_image(layer, psd, mode: str):
     return None
 
 
-def export_layers(layers, output_dir: Path, psd, mode: str, depth: int = 0):
+def export_layers(layers, output_dir: Path, psd, mode: str, depth: int = 0,
+                   progress_update=None):
     """Recursively export layers. Groups become folders, leaves become PNGs."""
     seen = {}
     exported = 0
@@ -96,8 +99,12 @@ def export_layers(layers, output_dir: Path, psd, mode: str, depth: int = 0):
             group_dir = output_dir / safe_name
             group_dir.mkdir(exist_ok=True)
             print(f"{indent}[folder] {layer.name} -> {safe_name}/")
-            exported += export_layers(layer, group_dir, psd, mode, depth + 1)
+            exported += export_layers(layer, group_dir, psd, mode, depth + 1,
+                                      progress_update=progress_update)
         else:
+            if progress_update:
+                progress_update("Exporting layers...", layer.name)
+
             image = export_layer_image(layer, psd, mode)
             if image is None:
                 print(f"{indent}[skip]   {layer.name} (could not render)")
@@ -111,21 +118,110 @@ def export_layers(layers, output_dir: Path, psd, mode: str, depth: int = 0):
     return exported
 
 
+def show_done_dialog(count: int, output_dir: Path):
+    """Show a completion dialog and offer to open the output folder."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+
+        open_folder = messagebox.askyesno(
+            "Export Complete",
+            f"Done! Exported {count} layers.\n\n"
+            f"Output: {output_dir}\n\n"
+            "Open the output folder?",
+        )
+        root.destroy()
+
+        if open_folder:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(output_dir)])
+            elif sys.platform == "win32":
+                os.startfile(str(output_dir))
+    except ImportError:
+        pass
+
+
+def show_error_dialog(message: str):
+    """Show an error dialog."""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        messagebox.showerror("Error", message)
+        root.destroy()
+    except ImportError:
+        pass
+
+
+def show_progress_window():
+    """Create a small progress window. Returns (root, label, update_fn, close_fn)."""
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.title("Exporting layers...")
+        root.attributes("-topmost", True)
+        root.resizable(False, False)
+
+        frame = tk.Frame(root, padx=30, pady=20)
+        frame.pack()
+
+        label = tk.Label(frame, text="Starting export...", font=("Arial", 12),
+                         width=40, anchor="w")
+        label.pack()
+
+        progress_label = tk.Label(frame, text="", font=("Arial", 10),
+                                  fg="gray", anchor="w", width=40)
+        progress_label.pack(pady=(5, 0))
+
+        root.update_idletasks()
+        w, h = root.winfo_width(), root.winfo_height()
+        x = (root.winfo_screenwidth() - w) // 2
+        y = (root.winfo_screenheight() - h) // 2
+        root.geometry(f"+{x}+{y}")
+
+        def update(status: str, detail: str = ""):
+            label.config(text=status)
+            progress_label.config(text=detail)
+            root.update()
+
+        def close():
+            root.destroy()
+
+        return root, update, close
+    except ImportError:
+        return None, lambda s, d="": None, lambda: None
+
+
 def process_psd(psd_path_str: str, mode: str = None):
     """Main processing: open PSD, pick mode if needed, export layers."""
-    psd_path = Path(psd_path_str.strip().strip('"').strip("'"))
+    psd_path = Path(psd_path_str.strip().strip('"').strip("'")).resolve()
 
     if not psd_path.exists():
-        print(f"Error: File not found: {psd_path}")
+        msg = f"File not found: {psd_path}"
+        print(f"Error: {msg}")
+        show_error_dialog(msg)
         return
 
     if not psd_path.suffix.lower() == ".psd":
-        print(f"Error: Not a PSD file: {psd_path}")
+        msg = f"Not a PSD file: {psd_path.name}"
+        print(f"Error: {msg}")
+        show_error_dialog(msg)
         return
 
     if mode is None:
         mode = pick_mode()
 
+    _root, progress_update, progress_close = show_progress_window()
+
+    progress_update("Opening PSD...", psd_path.name)
     print(f"Opening: {psd_path.name}")
     psd = PSDImage.open(str(psd_path))
     print(f"Canvas:  {psd.width}x{psd.height}")
@@ -136,8 +232,12 @@ def process_psd(psd_path_str: str, mode: str = None):
     print(f"Output:  {output_dir}")
     print()
 
-    count = export_layers(psd, output_dir, psd, mode)
+    progress_update("Exporting layers...", f"Mode: {mode} | Canvas: {psd.width}x{psd.height}")
+    count = export_layers(psd, output_dir, psd, mode, progress_update=progress_update)
     print(f"\nDone! Exported {count} layers.")
+
+    progress_close()
+    show_done_dialog(count, output_dir)
 
 
 def pick_psd_file() -> str:
